@@ -2,18 +2,20 @@ import numpy as np
 from tqdm import tqdm
 import os
 import pandas as pd
+from datetime import datetime
 
-# KB = 1.380649 * (10 ** -16) # ЭРГ/К
-KB = 1 # ЭРГ/К
-# M = 10 ** -24 # г
-M = 1 # г
-# A = 10 ** -8 # Ангстрем -> см
-A = 1 # Ангстрем -> м
+# KB = 1.380649 * (10 ** -16) # erg/k
+KB = 1 # erg/k
+# M = 10 ** -24 # g
+M = 1 # g
+# A = 10 ** -8 # Angstrem -> cm
+A = 1 # Angstrem -> m
 
 ELEMENTS = {
     'He': {
         'eps': 6.03 * KB,
         'sig': 2.63 * A,
+        # 'sig': 3.0 * A,
         'm': 6.67 * M,
         'r': 1.4 * A
     },
@@ -113,116 +115,60 @@ def writeOutput(filename, natoms, timestep, box, **data):
         if len(output):
             np.savetxt(fp, output.reshape((natoms, len(data)), order='F'))
 
-
-def wallHitCheck_old(pos, vels, box, element):
-    """ Эта функция обеспечивает выполнение отражающих граничных условий.
-    Все частицы, которые ударяются о стену, обновляют свою скорость
-    в противоположном направлении.
-    @pos: позиции молекул (ndarray)
-    @vels: скорости частиц (ndarray)
-    @box: размер бокса (tuple)
-    """
+def wallHitCheck(pos, box):
     ndims = len(box)
-    radius = element['r']
-
-    for i in range(ndims):
-        vels[((pos[:,i] - radius <= box[i][0]) | (pos[:,i] + radius >= box[i][1])),i] *= -1
-        pos[pos[:,i] - radius <= box[i][0],i] = box[i][0] + radius
-        pos[pos[:,i] + radius >= box[i][1],i] = box[i][1] - radius
-
-def wallHitCheck(pos, vels, box, element):
-    ndims = len(box)
-    radius = element['r']
 
     for i in range(ndims):
         teleport = box[i][1] - box[i][0]
         pos[pos[:,i] <= box[i][0], i] += teleport
         pos[pos[:,i] >= box[i][1], i] -= teleport
-        # pos[pos[:,i] <= box[i][0], i] = box[i][0]
-        # pos[pos[:,i] >= box[i][1], i] = box[i][1]
 
-def integrate_old(pos, vels, forces, mass,  dt):
-    """Метод Верле, который перемещает систему во времени
-    @pos: позиции частиц (ndarray)
-    @vels: скорость частицы (ndarray)
-    """
-    pos += vels * dt + forces * dt * dt / mass / 2 
-    vels += forces * dt / mass
-
-def integrate(pos, vels, element, dt, k, T, Tt):
-    force, E_pot  = computeForce(pos, vels, element, k)
+def integrate(pos, vels, element, dt, k, T=None, Tt=None):
+    force  = computeForce(pos, vels, element, size, k)
     half_vels = vels + force * dt / (2 * element['m'])
     pos += half_vels * dt
-    force2, E_pot2 = computeForce(pos, vels, element, k)
+    force2 = computeForce(pos, vels, element, size, k)
     vels = half_vels + force2 * dt / (2 * element['m'])
     return vels
 
-def computeForce_old(pos, vels, charge, k):
-    """Вычисляет силы Кулона, действующие на каждую частицу
-    @vels: скорости частиц (ndarray)
-    @charge: заряд (float)
-    @k: коэффициент пропорцональности (float)
-    возвращает силы (ndarray)
-    """
-
-    natoms, ndims = vels.shape
-    forces = np.zeros(vels.shape)
-
-    for i in range(natoms): # для каждой частицы i
-        for j in range(natoms): # перебираем все частицы кроме выбранной j
-            if j == i:
-                continue
-            Rij = np.array(pos[i,:]-pos[j,:], dtype=np.double) # радиус вектор от частицы j к частице i
-            Rij_module = np.sqrt(np.dot(Rij,Rij)) # модуль радиус вектора
-            forces[i] += k * charge * charge * Rij / np.power(Rij_module, 3) # вычисление силы, действующей со стороны частицы j на частицу i
-    return forces
-
-def computeForce(pos, vels, element, k):
+def computeForce(pos, vels, element, size, k, return_e_pot = False):
 
     natoms, ndims = vels.shape
     forces = np.zeros(vels.shape)
     E_pot = np.zeros(natoms)
-
-    for i in range(natoms): # для каждой частицы i
-        for j in range(natoms): # перебираем все частицы кроме выбранной j
+    size2 = 2 * size
+    teleports = [
+        np.array([     0,      0]),
+        np.array([ size2,      0]),
+        np.array([-size2,      0]),
+        np.array([     0,  size2]),
+        np.array([     0, -size2]),
+        ]
+    for i in range(natoms):
+        for j in range(natoms):
             if j == i:
                 continue
-            Rij = pos[i,:]-pos[j,:] # радиус вектор от частицы j к частице i
-            # Rij = np.array(Rij, dtype=np.float64)
-            # Rij *= 10**-4
-            Rij_module = np.sqrt(np.dot(Rij,Rij)) # модуль радиус вектора
-            E_pot[i] += k * 24 * element['eps'] * ((-2 * (element['sig'] / Rij_module)**12) + ((element['sig'] / Rij_module)**6))
-            forces[i] += E_pot[i] * Rij / Rij_module**2
-    return forces, E_pot
+            for tlprt in teleports:
+                Rij = pos[i,:]-(pos[j,:] + tlprt)
+                Rij_module = np.sqrt(np.dot(Rij,Rij))
+                if Rij_module < 2.5 * element['sig']:
+                    E_pot[i] += k * 24 * element['eps'] * ((2 * (element['sig'] / Rij_module)**12) - ((element['sig'] / Rij_module)**6))
+                    forces[i] += E_pot[i] * Rij / Rij_module**2
+    if return_e_pot:
+        return forces, E_pot
+    else:
+        return forces
   
 def run(**args):
-    """Это основная функция, которая решает уравнения движения для
-    системы молекул, использующая алгоритм Верле, и записывает в файл положения частиц
-    в разные моменты времени
-
-    @natoms (int): количество частиц
-    @mass (float): масса частиц
-    @charge (float): заряд частиц
-    @dt (float): временной шаг моделирования
-    @nsteps (int): общее количество шагов, выполняемых решателем
-    @box (tuple): размер коробки для моделирования
-    @ofname (str): имя файла для записи выходных данных в
-    @freq (int): запись выходных данных через freg шагов
-    @[radius]: радиус частицы (для визуализации)
-    возвращает состояния частиц в каждый шаг времени
-    """
 
     natoms, box, dt = args['natoms'], args['box'], args['dt']
     element, k, nsteps   = args['element'], args['k'], args['steps']
-    ofname, freq, T = args['ofname'], args['freq'], args['T']
+    dumpname, freq, T = args['dumpname'], args['freq'], args['T']
+    csvname = args['csvname']
 
     radius = element['r']
     
     dim = len(box)
-    # pos = np.random.rand(natoms,dim)
-
-    # for i in range(dim):
-        # pos[:,i] = box[i][0] + (box[i][1] -  box[i][0]) * pos[:,i]
 
     pos = generate_points_with_min_distance(natoms, box[0][1], 2 * element['r'] + element['sig'])
 
@@ -230,59 +176,52 @@ def run(**args):
     vels = vels * np.sqrt(natoms * KB * T / element['m'])
 
 
-    wallHitCheck(pos, vels, box, element)
+    wallHitCheck(pos, box)
 
     radius = np.ones(natoms) * radius
 
-    # while step <= nsteps:
     for step in tqdm(range(nsteps+1)):
 
-        forces, E_pot = computeForce(pos, vels, element, k)
+        forces, E_pot = computeForce(pos, vels, element, size, k, True)
 
-        # Перенос системы во времени
         vels = integrate(pos, vels, element, dt, k)
 
-        # Проверка столкновения частиц со стеной
-        wallHitCheck(pos, vels, box, element)
+        wallHitCheck(pos, box)
 
-        # Запись состояний в файл
         if not step%freq:
-            writeOutput(ofname, natoms, step, box, radius=radius, pos=pos, v=vels)
+            writeOutput(dumpname, natoms, step, box, radius=radius, pos=pos, v=vels)
         
-        backup = pd.DataFrame(index=np.ones(natoms)*step)
-        backup['id'] = range(natoms)
-        backup[['x', 'y']] = pos
-        backup[['vx', 'vy']] = vels
-        backup[['fx', 'fy']] = forces
-        backup['E_pot'] = E_pot
-        backup['E_kin'] = 0.5 * element['m'] * (backup['vx']**2 + backup['vy']**2)
-        back_path = 'backup.csv'
-        if not os.path.exists(back_path):
-            backup.to_csv(back_path)
-        else:
-            backup.to_csv(back_path, mode='a', header=False)
-
+            backup = pd.DataFrame(index=np.ones(natoms)*step)
+            backup['id'] = range(natoms)
+            backup[['x', 'y']] = pos
+            backup[['vx', 'vy']] = vels
+            backup[['fx', 'fy']] = forces
+            backup['E_pot'] = E_pot
+            backup['E_kin'] = 0.5 * element['m'] * (backup['vx']**2 + backup['vy']**2)
+            if not os.path.exists(csvname):
+                backup.to_csv(csvname)
+            else:
+                backup.to_csv(csvname, mode='a', header=False)
 
 if __name__ == '__main__':
 
     element = ELEMENTS['He']
-    size = element['r'] * 25
+    size = element['r'] * 30
     box = ((-size, size), (-size, size))
-    name_2d = 'MD_2D.dump'
     params = {
-        'steps': 10000, # количество шагов
-        'natoms': 10, # количество атомов (частиц)
+        'steps': 10000,
+        'natoms': 100,
         'element': element,
         'box': box,
         'T': 273,
         'Tt': 1,
-        'dt': 0.001, # временной шаг
-        'k': 1000, # коэф. пропорциональности
-        'freq': 1, # через какое число шагов вести запись состояний
-        'ofname': name_2d
+        'dt': 0.001,
+        'k': 10,
+        'freq': 1
         }
-    if os.path.exists(name_2d):
-        os.remove(name_2d)
-    if os.path.exists('backup.csv'):
-        os.remove('backup.csv')
-    run(**params)
+    now = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+    name_dump = f'dump/N{params["natoms"]}_{now}.dump'
+    name_csv = f'dump/N{params["natoms"]}_{now}.csv'
+    if os.path.exists(name_dump):
+        os.remove(name_dump)
+    run(**params, dumpname=name_dump, csvname=name_csv)
